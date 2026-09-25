@@ -1,0 +1,52 @@
+media: i2c: dw9719: add back the i2c device id table
+
+Upstream v6.19 dropped the i2c_device_id table from this driver (and
+.id_table with it) while converting it to CCI. That breaks every ACPI
+platform, because there the CIO2 bridge instantiates the VCM as an i2c
+client carrying a *software* node, not an OF node:
+
+    i2c-INT347A:00-VCM   modalias = i2c:dw9719
+
+With no of_node the OF table can never match, so the VCM never probes.
+ov8865 then sits forever in v4l2-async waiting for its fwnode provider,
+the CIO2 notifier never completes, no media links get created, and
+libcamera's registerCameras() returns -ENODEV - i.e. *no* cameras appear
+at all. The front ov5693 is a collateral victim: it has no VCM of its
+own, it is simply behind the same notifier.
+
+This restores what v6.18 had.
+
+Applies to : linux v6.19.x, drivers/media/i2c/dw9719.c
+             (assumes the fsleep() hunk of 0002 is already present, which
+             it is on any linux-surface kernel)
+Apply with : patch -p1 < 0001-...patch     (run from the kernel tree root)
+
+--- a/drivers/media/i2c/dw9719.c
++++ b/drivers/media/i2c/dw9719.c
+@@ -451,6 +451,18 @@
+ };
+ MODULE_DEVICE_TABLE(of, dw9719_of_table);
+ 
++/*
++ * On ACPI systems the bridge instantiates the VCM as an i2c client carrying a
++ * software node, so it has no of_node and the OF table above can never match
++ * it. Keep an i2c id table for those platforms.
++ */
++static const struct i2c_device_id dw9719_id_table[] = {
++	{ "dw9719", DW9719 },
++	{ "dw9761", DW9761 },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, dw9719_id_table);
++
+ static DEFINE_RUNTIME_DEV_PM_OPS(dw9719_pm_ops, dw9719_suspend, dw9719_resume,
+ 				 NULL);
+ 
+@@ -462,6 +474,7 @@
+ 	},
+ 	.probe = dw9719_probe,
+ 	.remove = dw9719_remove,
++	.id_table = dw9719_id_table,
+ };
+ module_i2c_driver(dw9719_i2c_driver);
+ 

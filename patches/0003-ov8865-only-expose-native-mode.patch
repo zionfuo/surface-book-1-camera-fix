@@ -1,0 +1,94 @@
+media: i2c: ov8865: only expose the native mode, the others stall
+
+On a Surface Book 1 (and, judging by the shape of the bug, anywhere the
+sensor is behind the Intel IPU3 / CIO2 bridge) only ov8865_modes[0], the
+native 3264x2448 mode, streams continuously. The other three modes deliver
+roughly one frame and then stop:
+
+    mode        v4l2-ctl --stream-mmap --stream-count=5
+    3264x2448   5/5 frames, rc=0
+    3264x1836   0.99 frames, then nothing
+    1632x1224   0.99 frames, then nothing
+     800x600    1.00 frames, then nothing
+
+Alternating good/bad/good/bad reproduces the same pattern, so it is a
+property of the mode and not of stream-on state. dmesg shows
+
+    ipu3-cio2: payload length is 2585088, received 2588672
+    CSI-2 receiver port 0: frame sync error
+
+- 3584 bytes more than expected, then desync. The timing tables
+(HTS/VTS) for the non-native modes look wrong; the receiver overflows.
+
+Why this is fatal in practice: libcamera picks the *smallest* mode that is
+>= the requested size. An application asking for 1280x720 therefore gets
+1632x1224, i.e. a broken mode. GNOME Snapshot asks for exactly 1280x720
+(it cannot ask for more - the IPU3 pipeline caps every camera at
+1280x720), so it gets nothing at all, and the never-written zero buffer
+renders as pure green. YUV(0,0,0) is RGB(0,154,0).
+
+The proper fix needs the OV8865 datasheet: ov8865_pll1_config has a single
+configuration shared by all modes while ov8865_pll2_config has per-mode
+variants, and ov8865_mode_pll1_rate()/_configure() take a mode pointer and
+then ignore it, so PLL1 - and therefore the MIPI clock, pll1_rate / m_div
+/ 2 - is reported as the same 360 MHz for every mode. Without binning PLL1
+numbers there is nothing to correct.
+
+As a workaround, hide the broken modes: VIDIOC_ENUM_FRAMESIZES reports
+only the native one, so libcamera has no choice, and set_fmt pins the
+mode as well so that a caller driving V4L2 directly cannot select a
+broken one either.
+
+Cost: the sensor always runs 3264x2448 and the IMGU downsamples (2.55x for
+a 1280x720 request). Field of view gets *wider*, not narrower - the
+non-native modes crop, the native one uses the full array.
+
+Applies to : linux v6.19.x, drivers/media/i2c/ov8865.c
+Apply with : patch -p1 < 0003-...patch     (run from the kernel tree root)
+
+--- a/drivers/media/i2c/ov8865.c
++++ b/drivers/media/i2c/ov8865.c
+@@ -2688,6 +2688,17 @@
+ 	return 0;
+ }
+ 
++/*
++ * Surface Book 1 workaround: only ov8865_modes[0] (3264x2448 native) streams
++ * reliably on this sensor/ACPI combination -- the other three modes deliver
++ * roughly one frame and then stall, which libcamera surfaces to applications
++ * as a never-filled (green) buffer. GNOME Snapshot is hit hardest: it asks for
++ * 1280x720, libcamera picks the smallest mode >= that request (1632x1224) and
++ * gets nothing. Hide the broken modes so the native one is always selected,
++ * whatever resolution the application asks for.
++ */
++#define OV8865_NR_USABLE_MODES		1
++
+ static int ov8865_set_fmt(struct v4l2_subdev *subdev,
+ 			  struct v4l2_subdev_state *sd_state,
+ 			  struct v4l2_subdev_format *format)
+@@ -2720,14 +2731,8 @@
+ 	if (!mbus_code)
+ 		mbus_code = ov8865_mbus_codes[0];
+ 
+-	/* Find the mode with nearest dimensions. */
+-	mode = v4l2_find_nearest_size(ov8865_modes, ARRAY_SIZE(ov8865_modes),
+-				      output_size_x, output_size_y,
+-				      mbus_format->width, mbus_format->height);
+-	if (!mode) {
+-		ret = -EINVAL;
+-		goto complete;
+-	}
++	/* Pin the request to the only mode that streams -- see above. */
++	mode = &ov8865_modes[0];
+ 
+ 	ov8865_mbus_format_fill(mbus_format, mbus_code, mode);
+ 
+@@ -2765,7 +2770,7 @@
+ {
+ 	const struct ov8865_mode *mode;
+ 
+-	if (size_enum->index >= ARRAY_SIZE(ov8865_modes))
++	if (size_enum->index >= OV8865_NR_USABLE_MODES)
+ 		return -EINVAL;
+ 
+ 	mode = &ov8865_modes[size_enum->index];

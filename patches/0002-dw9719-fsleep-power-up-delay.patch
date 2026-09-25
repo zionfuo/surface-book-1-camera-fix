@@ -1,0 +1,31 @@
+media: i2c: dw9719: fix probe error on surface go 2
+
+On surface go 2, sometimes probing dw9719 fails with
+"dw9719: probe of i2c-INT347A:00-VCM failed with error -121".
+The -121 (-EREMOTEIO) comes from i2c-designware-common.c and indicates
+the initialize happens too early, so just add a delay. There is no exact
+reason for 10000us, but 100us failed.
+
+NOT OURS - this is linux-surface's own patch (author: mojyack), carried in
+linux-surface/patches/6.19/0013-cameras.patch. It is reproduced here only
+because the out-of-tree module in src/dw9719/ replaces the built-in
+dw9719.ko wholesale and therefore has to contain it too.
+
+If you are building against a linux-surface kernel tree, this hunk is
+already applied - use 0001 alone.
+
+Applies to : linux v6.19.x, drivers/media/i2c/dw9719.c
+Apply with : patch -p1 < 0002-...patch     (run from the kernel tree root)
+
+--- a/drivers/media/i2c/dw9719.c
++++ b/drivers/media/i2c/dw9719.c
+@@ -121,6 +121,9 @@
+ 	if (ret)
+ 		return ret;
+ 
++	/* Wait for device to be acknowledged */
++	fsleep(10000);
++
+ 	/*
+ 	 * Need 100us to transition from SHUTDOWN to STANDBY.
+ 	 * Jiggle the SCL pin to wake up the device (even when the regulator is

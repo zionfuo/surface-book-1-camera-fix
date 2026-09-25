@@ -1,0 +1,18 @@
+# Kernel module build products
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+Module.symvers
+modules.order
+.tmp_versions/
+.module-common.o
+.*.cmd
+
+# Scratch output from diagnose.sh
+*.raw
+*.bin
+
+__pycache__/
