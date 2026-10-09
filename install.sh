@@ -3,15 +3,14 @@
 # Install the built modules into /lib/modules/<release>/updates/.
 #
 # updates/ takes precedence over the kernel's own copy of the same module,
-# so this shadows the built-in dw9719 and ov8865 without touching anything
-# the package manager owns. Uninstalling is a plain file removal.
-#
+# so this shadows the built-in dw9719, ov8865 and ov5693 without touching
+# anything the package manager owns. Uninstalling is a plain file removal.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KREL="${KREL:-$(uname -r)}"
 DEST="/lib/modules/$KREL/updates"
-MODS=(dw9719 ov8865)
+MODS=(dw9719 ov8865 ov5693)
 
 if [ "$(id -u)" -ne 0 ]; then
 	echo "error: run as root (sudo ./install.sh)" >&2

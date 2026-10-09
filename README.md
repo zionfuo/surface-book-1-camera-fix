@@ -19,12 +19,13 @@ derived from the Linux kernel.
 
 > 中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
-## The two bugs
+## The bugs
 
 | # | Symptom | Cause | Fix |
 |---|---|---|---|
 | 1 | **No cameras at all.** Neither front nor rear is listed by libcamera. | v6.19 dropped the `i2c_device_id` table from `dw9719`, so the VCM cannot bind on ACPI platforms, so the CIO2 notifier never completes. | [`patches/0001`](patches/0001-dw9719-add-back-i2c-device-id-table.patch) |
 | 2 | **Rear camera gives a flat green image**, or nothing. | `ov8865` only streams in its native 3264x2448 mode. Every other mode delivers ~1 frame and stalls. | [`patches/0003`](patches/0003-ov8865-only-expose-native-mode.patch) |
+| 3 | **Front camera works with `cam` but shows nothing in any application** (Surface Pro 5, 1796). | `ov5693` has no mode table: it *derives* a 2x2 binned output (1296x972) from the requested size, and that mode never streams behind the IPU3. Applications ask for 1280x720, so they always land on it. | [`patches/0004`](patches/0004-ov5693-pin-native-mode.patch) |
 
 [`patches/0002`](patches/0002-dw9719-fsleep-power-up-delay.patch) is
 **not ours** — it is linux-surface's own probe delay for the same driver,
@@ -199,6 +200,36 @@ Cost:
 
 This is a workaround, and it is labelled as one. If someone has the datasheet,
 please fix PLL1 properly and delete `patches/0003`.
+
+## Bug 3 - the front camera in applications (added 2026-10-08)
+
+On a Surface Pro 5 (1796), the front `ov5693` streams fine at 2592x1944 when libcamera drives it
+directly, but delivers nothing through an application:
+
+    ipu3-cio2: CSI-2 receiver port 1: frame sync error
+    ipu3-cio2: payload length is 1617408, received 0
+
+`media-ctl -p` shows why - the sensor is programmed with a *different* mode in each case:
+
+    direct       : SBGGR10_1X10/2592x1944   (native)  -> 28.5 fps
+    application  : SBGGR10_1X10/1296x972    (binned)  -> 0 bytes
+
+`ov5693_set_fmt()` derives that binning from the requested size
+(`hratio = clamp(DIV_ROUND_CLOSEST(crop->width, width), 1, 2)`); 1280x720 gives 2/2 -> 1296x972, and
+the IPU3 pipeline caps every camera at 1280x720, so no application can avoid it. Pinning
+`hratio = vratio = 1` keeps the sensor in its native mode and lets the IMGU downsample - the same
+remedy as 0003, for the same reason. This repository therefore builds three modules:
+`MODS=(dw9719 ov8865 ov5693)`.
+
+Note for Chrome on Wayland: it enumerates cameras over V4L2 and does not use the portal by default, so
+it sees none of them. `--enable-features=WebRtcPipeWireCamera` in `~/.config/chrome-flags.conf` makes it
+go through the portal.
+
+Upstream, the same binned-mode fault is reported on IPU6 (Surface Pro 8, Pro 7+): **linux-surface#2234**,
+and **#2252** carries a proper driver-side fix of the binned mode for IPU6 (per-mode PLL and readout
+registers recovered from the Windows driver). Neither covers IPU3. This patch is therefore the IPU3
+counterpart of `0003` - a workaround to be dropped the day a driver-side fix of the binned mode covers
+IPU3 as well.
 
 ## Rolling back
 

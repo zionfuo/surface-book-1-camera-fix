@@ -1,0 +1,96 @@
+media: i2c: ov5693: pin the sensor to its native mode, the binned one stalls
+
+On a Surface Pro 5 (1796) with linux-surface 6.19.8, the front camera streams
+perfectly when libcamera drives it directly -- `cam -c2 --capture=5` gives
+28.5 fps at 1280x720 -- but produces *nothing* when an application asks for it
+through PipeWire (Kamoso, Chrome/webcamtests). The kernel says, on every try:
+
+    ipu3-cio2: CSI-2 receiver port 1: frame sync error
+    ipu3-cio2: payload length is 1617408, received 0
+
+(the sensor's power LED comes on, so the sensor is powered: it just never
+delivers a byte). The difference between the two runs is the *sensor mode*,
+visible on the CSI-2 link with media-ctl:
+
+    direct (works)      : SBGGR10_1X10/2592x1944   <- native
+    via an application  : SBGGR10_1X10/1296x972    <- binned 2x2
+
+ov5693_set_fmt() derives that binning from the requested size:
+
+    hratio = clamp_t(..., DIV_ROUND_CLOSEST(crop->width,  width), 1, 2);
+    vratio = clamp_t(..., DIV_ROUND_CLOSEST(crop->height, height), 1, 2);
+
+a 1280x720 request gives hratio = round(2592/1280) = 2 and
+vratio = round(1944/720) = 3 -> clamped to 2, hence the 1296x972 output. And
+1280x720 is exactly what every application asks for, because the IPU3 pipeline
+caps all its cameras at that size and libcamera picks the smallest mode >= the
+request. So every application lands on the binned mode.
+
+Why the direct path escapes it is libcamera's business (it configures the
+sensor at its default 2592x1944 rather than at the requested size); what
+matters here is that the binned output does not stream on this sensor/bridge
+combination. Pin hratio and vratio to 1 so the sensor always runs its native
+2592x1944 mode, whatever size the caller asks for; the IMGU downsamples
+(2.03x for a 1280x720 request). This is the same remedy, for the same reason,
+as 0003 does for the ov8865's non-native modes.
+
+Cost: the sensor always runs 2592x1944 (slightly more power, IMGU always
+downsamples), and a caller asking for a *smaller* size than the crop now gets
+2592x1944 instead of a binned 1296x972 -- which is the point.
+
+Applies to : linux v6.19.x, drivers/media/i2c/ov5693.c
+Apply with : patch -p1 < 0004-...patch     (run from the kernel tree root)
+
+--- a/drivers/media/i2c/ov5693.c
++++ b/drivers/media/i2c/ov5693.c
+@@ -814,29 +814,34 @@
+ 	const struct v4l2_rect *crop;
+ 	struct v4l2_mbus_framefmt *fmt;
+ 	unsigned int hratio, vratio;
+-	unsigned int width, height;
+ 	unsigned int hblank;
+ 	int exposure_max;
+ 
+ 	crop = __ov5693_get_pad_crop(ov5693, state, format->pad, format->which);
+ 
+ 	/*
+-	 * Align to two to simplify the binning calculations below, and clamp
+-	 * the requested format at the crop rectangle
++	 * Surface Pro 5 / IPU3 workaround: the 2x2 binned path does not stream.
++	 *
++	 * Measured on a Surface Pro 5 (1796) running linux-surface 6.19.8: a
++	 * request for 1280x720 -- which is what libcamera hands this sensor,
++	 * because the IPU3 pipeline caps every camera at that size -- used to
++	 * select the binned output 1296x972 (hratio/vratio == 2). The CSI-2
++	 * receiver then reported
++	 *
++	 *   ipu3-cio2: CSI-2 receiver port 1: frame sync error
++	 *   ipu3-cio2: payload length is 1617408, received 0
++	 *
++	 * i.e. not a single byte, while the sensor's own power LED came on.
++	 * The native 2592x1944 mode (hratio/vratio == 1) streams at 28.5 fps.
++	 * libcamera picks the smallest size >= the request, so every
++	 * application lands on the broken binned mode.
++	 *
++	 * Pin the sensor to its native mode whatever the caller asks for; the
++	 * IMGU downsamples for smaller requests. Same remedy as the ov8865
++	 * non-native modes on this platform.
+ 	 */
+-	width = clamp_t(unsigned int, ALIGN(format->format.width, 2),
+-			OV5693_MIN_CROP_WIDTH, crop->width);
+-	height = clamp_t(unsigned int, ALIGN(format->format.height, 2),
+-			 OV5693_MIN_CROP_HEIGHT, crop->height);
+-
+-	/*
+-	 * We can only support setting either the dimensions of the crop rect
+-	 * or those dimensions binned (separately) by a factor of two.
+-	 */
+-	hratio = clamp_t(unsigned int,
+-			 DIV_ROUND_CLOSEST(crop->width, width), 1, 2);
+-	vratio = clamp_t(unsigned int,
+-			 DIV_ROUND_CLOSEST(crop->height, height), 1, 2);
++	hratio = 1;
++	vratio = 1;
+ 
+ 	fmt = __ov5693_get_pad_format(ov5693, state, format->pad,
+ 				      format->which);
